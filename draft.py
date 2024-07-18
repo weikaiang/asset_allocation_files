@@ -347,8 +347,8 @@ def train(model, args, train_loader):
     start_time = time.time()  # 计算起始时间,用于展示进度
     lstm_model = model
     #loss_function = nn.MSELoss()
-    #loss_function = DTWLoss()
-    loss_function = ATPLRLoss()
+    loss_function = DTWLoss()
+    #loss_function = ATPLRLoss()
     optimizer = torch.optim.Adam(lstm_model.parameters(), lr=0.005)
     epochs = args.epochs
     lstm_model.train()  # 训练模式
@@ -501,6 +501,7 @@ def pred(args):
         print(f">>>>>>>>>>>>>>>>>>>>>>>>>输出最后一个窗口的IC和IR值<<<<<<<<<<<<<<<<<<<<<<<<<<<")
         ic, ir = evaluate(model, args, device, scaler_train, rate_df, test_data)
         print(f"IC: {ic}, IR: {ir}")
+        print(prediction)
     return prediction, ic, ir
 
 

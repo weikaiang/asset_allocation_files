@@ -1,7 +1,6 @@
 import argparse
 import numpy as np
 import pandas as pd
-from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from tqdm import tqdm
 import time
@@ -215,27 +214,42 @@ class DTWLoss(nn.Module):
     def __init__(self):
         super(DTWLoss, self).__init__()
 
-    def forward(self, x, y):
-        len1 = len(x)
-        len2 = len(y)
+    def forward(self, s1_batch, s2_batch):
+        device = s1_batch.device  # Get the device (CPU or GPU) of the input tensor
 
-        # Initialize DTW matrix with infinities
-        DTW = torch.zeros((len1, len2)) + float('inf')
-        # Set the initial condition
-        DTW[0, 0] = (x[0] - y[0]).pow(2)
+        batch_size = s1_batch.shape[0]
+        len1 = s1_batch.shape[1]
+        len2 = s2_batch.shape[1]
+        feat_dim = s1_batch.shape[2]  # Assuming both s1_batch and s2_batch have the same feature dimension
+
+        # Initialize DTW matrix with infinities for each batch element
+        DTW = torch.zeros((batch_size, len1, len2), device= device) + float('inf')
+
+        # Set the initial conditions for each batch element
+        DTW[:, 0, 0] = torch.sum((s1_batch[:, 0] - s2_batch[:, 0]).pow(2), dim=1)
 
         # Fill the DTW matrix
         for i in range(len1):
             for j in range(len2):
                 if i > 0 or j > 0:
-                    cost = (x[i] - y[j]).pow(2)
-                    min_prev = torch.min(DTW[max(i - 1, 0), j], DTW[i, max(j - 1, 0)],
-                                         DTW[max(i - 1, 0), max(j - 1, 0)])
-                    DTW[i, j] = cost + min_prev
+                    cost = torch.sum((s1_batch[:, i] - s2_batch[:, j]).pow(2), dim=1)
+                    prev_costs = []
 
-        # Return the square root of the minimum DTW distance
-        mse_loss = torch.sqrt(DTW[len1 - 1, len2 - 1])
-        return mse_loss
+                    if i > 0:
+                        prev_costs.append(DTW[:, i - 1, j])
+                    if j > 0:
+                        prev_costs.append(DTW[:, i, j - 1])
+                    if i > 0 and j > 0:
+                        prev_costs.append(DTW[:, i - 1, j - 1])
+
+                    prev_costs_tensor = torch.stack(prev_costs, dim=1)
+                    min_prev, _ = torch.min(prev_costs_tensor, dim=1)
+
+                    DTW[:, i, j] = cost + min_prev
+
+        # Return the square root of the minimum DTW distance for each batch element
+        dtw_loss = torch.mean(torch.sqrt(DTW[:, len1 - 1, len2 - 1]))
+        return dtw_loss
 
 class ATPLRLoss(nn.Module):
     def __init__(self):
@@ -295,6 +309,7 @@ class ATPLRLoss(nn.Module):
 def train(model, args, train_loader):
     start_time = time.time()  # 计算起始时间,用于展示进度
     lstm_model = model
+    #loss_function = nn.MSELoss()
     loss_function = DTWLoss()
     #loss_function = ATPLRLoss()
     optimizer = torch.optim.Adam(lstm_model.parameters(), lr=0.005)
@@ -441,9 +456,10 @@ def pred(args):
 #主要参数修改#
 if __name__ == '__main__':
     data = pd.read_csv('asset.csv')
-    #args1 = LSTMargs(data, epochs = 30)
-    #pred_val = pred(args1)
+    args1 = LSTMargs(data, epochs = 50, window_size = 252, pre_len = 60)
+    pred_val = pred(args1)
+    print(pred_val)
     #pred_val.to_csv('pred_rate.csv')
-    args2 = LSTMargs(data, epochs=50, method='factor')
-    pred, pred_fac = pred(args2)
+    #args2 = LSTMargs(data, epochs=50, method='factor')
+    #pred, pred_fac = pred(args2)
     #pred_fac.to_csv('pred_fac.csv')
