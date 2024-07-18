@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from scipy.stats import pearsonr
 from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.stattools import adfuller, kpss
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, sequences):
@@ -346,8 +345,16 @@ class ATPLRLoss(nn.Module):
 def train(model, args, train_loader):
     start_time = time.time()  # 计算起始时间,用于展示进度
     lstm_model = model
+    #选择损失函数
+    loss = args.loss
+    loss_select ={
+        'MSE': nn.MSELoss(),
+        'DTW': DTWLoss(),
+        'PLR': ATPLRLoss(),
+    }
+    loss_function = loss_select[loss]
     #loss_function = nn.MSELoss()
-    loss_function = DTWLoss()
+    #loss_function = DTWLoss()
     #loss_function = ATPLRLoss()
     optimizer = torch.optim.Adam(lstm_model.parameters(), lr=0.005)
     epochs = args.epochs
@@ -423,7 +430,7 @@ def evaluate(model, args, device, scaler, data, test_data):
 
     return IC, IR
 
-def LSTMargs(data_df, method='rate', window_size=60, pre_len=15, size=8, lr=0.001, drop_out=0.05, epochs=50,
+def LSTMargs(data_df, method='rate', loss = 'MSE', window_size=60, pre_len=15, size=8, lr=0.001, drop_out=0.05, epochs=50,
              batch_size=16):
     """
     window_size:用来预测的时间窗口大小
@@ -435,6 +442,7 @@ def LSTMargs(data_df, method='rate', window_size=60, pre_len=15, size=8, lr=0.00
     drop_out:随机丢弃概率
     epochs:训练轮次
     batch_size:批次大小
+    loss:损失函数选择
     """
 
     parser = argparse.ArgumentParser(description='Time Series forecast')
@@ -457,12 +465,13 @@ def LSTMargs(data_df, method='rate', window_size=60, pre_len=15, size=8, lr=0.00
     parser.add_argument('-epochs', type=int, default=epochs, help="训练轮次")
     parser.add_argument('-batch_size', type=int, default=batch_size, help="批次大小")
     parser.add_argument('-save_path', type=str, default='models')
-    parser.add_argument('-method', type=str, default=method, help="loss计算方式")  # 可能需要调整
+    parser.add_argument('-method', type=str, default=method, help="数据格式")  # 可能需要调整
 
     # model
     parser.add_argument('-hidden-size', type=int, default=128, help="隐藏层单元数")
     parser.add_argument('-kernel-sizes', type=str, default='3')
     parser.add_argument('-laryer_num', type=int, default=1)
+    parser.add_argument('-loss', type=str, default=loss, help = "损失函数类型")
     # device
     parser.add_argument('-use_gpu', type=bool, default=False)
     parser.add_argument('-device', type=int, default=0, help="只设置最多支持单个gpu训练")
@@ -508,10 +517,10 @@ def pred(args):
 # 主要参数修改#
 if __name__ == '__main__':
 
-    data = pd.read_csv('asset.csv')
+    data = pd.read_csv('assetfac.csv')
     # args1 = LSTMargs(data, epochs = 30)
     # pred_val = pred(args1)
     # pred_val.to_csv('pred_rate.csv')
-    args2 = LSTMargs(data, epochs=50, window_size=252, pre_len=60)
+    args2 = LSTMargs(data, epochs=50, window_size=504, pre_len=60, loss = 'PLR')
     pred, ic, ir= pred(args2)
     # pred_fac.to_csv('pred_fac.csv')
