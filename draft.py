@@ -146,7 +146,7 @@ class SelfAttention(nn.Module):
 
         assert (
                 self.head_dim * heads == feature_size
-        ), "Feature size needs to be divisible by heads"
+        ), "Feature size needs to be divisible by heads"  # 特征维度必须能被头数整除
 
         self.values = nn.Linear(self.head_dim, self.head_dim, bias=False)
         self.keys = nn.Linear(self.head_dim, self.head_dim, bias=False)
@@ -157,7 +157,7 @@ class SelfAttention(nn.Module):
         N = query.shape[0]
         value_len, key_len, query_len = values.shape[1], keys.shape[1], query.shape[1]
 
-        # Split the embedding into self.heads different pieces
+        # 将嵌入拆分成self.heads个部分
         values = values.reshape(N, value_len, self.heads, self.head_dim)
         keys = keys.reshape(N, key_len, self.heads, self.head_dim)
         queries = query.reshape(N, query_len, self.heads, self.head_dim)
@@ -166,9 +166,7 @@ class SelfAttention(nn.Module):
         keys = self.keys(keys)
         queries = self.queries(queries)
 
-        # Einsum does matrix multiplication for query*keys for each training example
-        # with every other training example, don't be confused by einsum
-        # it's just a way to do batch matrix multiplication
+        # Einsum进行query和keys的矩阵乘法，每个训练样本与其他所有训练样本
         energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
 
         if mask is not None:
@@ -183,33 +181,48 @@ class SelfAttention(nn.Module):
         out = self.fc_out(out)
         return out
 
+class ResNetBlock(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(ResNetBlock, self).__init__()
+        self.layer1 = nn.Linear(in_features, out_features)
+        self.relu = nn.ReLU()
+        self.layer2 = nn.Linear(out_features, out_features)
+        self.shortcut = nn.Linear(in_features, out_features) if in_features != out_features else nn.Identity()
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.relu(self.layer1(x))
+        out = self.layer2(out)
+        out += identity
+        out = self.relu(out)
+        return out
+
 class TPALSTM(nn.Module):
     def __init__(self, input_size, output_horizon, hidden_size, obs_len, n_layers, device):
         super(TPALSTM, self).__init__()
         self.hidden = nn.Linear(input_size, hidden_size)
         self.relu = nn.ReLU()
-        self.lstm = nn.LSTM(hidden_size, hidden_size, n_layers, bias=True,
-                            batch_first=True)  # output (batch_size, obs_len, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, n_layers, bias=True, batch_first=True)  # 输出 (batch_size, obs_len, hidden_size)
         self.hidden_size = hidden_size
         self.obs_len = obs_len
         self.output_horizon = output_horizon
         self.attention = SelfAttention(input_size, output_horizon)
+        # 堆叠10个ResNet块
+        self.resnet_blocks = nn.Sequential(*[ResNetBlock(hidden_size, hidden_size) for _ in range(10)])
         self.linear = nn.Linear(hidden_size, output_horizon)
         self.n_layers = n_layers
         self.device = device
 
     def forward(self, x):
-
         x = self.attention(x, x, x, None)
-
         batch_size, obs_len, features_size = x.shape  # (batch_size, obs_len, features_size)
 
         xconcat = self.hidden(x)  # (batch_size, obs_len, hidden_size)
 
         H = torch.zeros(batch_size, obs_len - 1, self.hidden_size).to(
-            self.device)  # (batch_size, obs_len-1, hidden_size)
+                            self.device)  # (batch_size, obs_len-1, hidden_size)
         ht = torch.zeros(self.n_layers, batch_size, self.hidden_size).to(
-            self.device)  # (num_layers, batch_size, hidden_size)
+                            self.device)  # (num_layers, batch_size, hidden_size)
         ct = ht.clone()
         for t in range(obs_len):
             xt = xconcat[:, t, :].view(batch_size, 1, -1)  # (batch_size, 1, hidden_size)
@@ -217,7 +230,9 @@ class TPALSTM(nn.Module):
             htt = ht[-1, :, :]  # (batch_size, hidden_size)
             if t != obs_len - 1:
                 H[:, t, :] = htt
+
         H = self.relu(H)  # (batch_size, obs_len-1, hidden_size)
+        H = self.resnet_blocks(H)  # 应用ResNet块
         ypred = self.linear(H)  # (batch_size, output_horizon)
         ypred = ypred[:, -self.obs_len:, :]
         return ypred
@@ -511,16 +526,17 @@ def pred(args):
         ic, ir = evaluate(model, args, device, scaler_train, rate_df, test_data)
         print(f"IC: {ic}, IR: {ir}")
         print(prediction)
+        print(args.loss, args.window_size, args.pre_len)
     return prediction, ic, ir
 
 
 # 主要参数修改#
 if __name__ == '__main__':
 
-    data = pd.read_csv('assetfac.csv')
+    data = pd.read_csv('datafacfit.csv')
     # args1 = LSTMargs(data, epochs = 30)
     # pred_val = pred(args1)
     # pred_val.to_csv('pred_rate.csv')
-    args2 = LSTMargs(data, epochs=50, window_size=504, pre_len=60, loss = 'PLR')
+    args2 = LSTMargs(data,size = 7, epochs=50, window_size=504, pre_len=60, loss = 'MSE')
     pred, ic, ir= pred(args2)
     # pred_fac.to_csv('pred_fac.csv')
