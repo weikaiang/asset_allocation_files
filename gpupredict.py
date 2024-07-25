@@ -1,7 +1,6 @@
 import argparse
 import numpy as np
 import pandas as pd
-from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from tqdm import tqdm
 import time
@@ -9,7 +8,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
-
+from scipy.stats import pearsonr
+from statsmodels.tsa.arima.model import ARIMA
+import torchvision.models as models
 
 # # 随机数种子
 # np.random.seed(1)
@@ -50,63 +51,98 @@ def create_dataloader(config, device):
 
     cols_data = df.columns[1:]  # 除去时间列之后的index值
     df_data = df[cols_data]  # 获取除时间列之外的数据
+    # 留下最后一个预测长度为测试集，其余为训练集
+    df_data_test = df_data[-config.pre_len:]
+    df_data = df_data[:-config.pre_len]
+
+    df_data, arima_pred = get_arima(df_data, config)
 
     # 这里加一些数据的预处理, 最后需要的格式是pd.series
     true_data = df_data.values
 
-    true_data_list = []
-    for i in range(config.input_size):
-        init = 10000  # 设初始因子值为10000
-        list_temp = []
-        for j in range(len(true_data)):
-            factor = (1 + true_data[j, i]) * init
-            init = factor
-            list_temp.append(init)
-        true_data_list.append(list_temp)
-    true_data_fac = np.array(true_data_list).transpose()
-    factor_df = pd.DataFrame(true_data_fac)
-
-    # 定义标准化优化器
-    scaler_fac = StandardScaler()
-    # 进行标准化处理
-    fac_data_normalized = scaler_fac.fit_transform(true_data_fac)
-    # 转化为深度学习模型需要的类型Tensor
-    #fac_data_normalized = torch.FloatTensor(fac_data_normalized).to(device)
-    # 定义训练器的的输入
-    fac_inout_seq = create_inout_sequences(fac_data_normalized, train_window, pre_len, config)
-    # 创建数据集
-    fac_dataset = TimeSeriesDataset(fac_inout_seq)
-    # 创建 DataLoader
-    fac_loader = DataLoader(fac_dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=0)
-
     # 定义标准化优化器
     scaler_train = StandardScaler()
 
-    # 70%训练集，15%测试集和15%交叉验证集
+    # 保留下的数据，全部作为测试集
     train_data = true_data
-    # train_data = true_data[int(0.3 * len(true_data)):]
     print("训练集尺寸:", len(train_data))
 
     # 进行标准化处理
     train_data_normalized = scaler_train.fit_transform(train_data)
-
     # 转化为深度学习模型需要的类型Tensor
-    #train_data_normalized = torch.FloatTensor(train_data_normalized).to(device)
-
+    train_data_normalized = torch.FloatTensor(train_data_normalized).to(device)
     # 定义训练器的的输入
     train_inout_seq = create_inout_sequences(train_data_normalized, train_window, pre_len, config)
-
     # 创建数据集
     train_dataset = TimeSeriesDataset(train_inout_seq)
-
     # 创建 DataLoader
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, drop_last=True, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
     print("通过滑动窗口共有训练集数据：", len(train_inout_seq), "转化为批次数据:", len(train_loader))
-    # print("通过滑动窗口共有测试集数据：", len(test_inout_seq), "转化为批次数据:", len(test_loader))
-    # print("通过滑动窗口共有验证集数据：", len(valid_inout_seq), "转化为批次数据:", len(valid_loader))
     print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>创建数据加载器完成<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-    return train_loader, scaler_train, df_data, factor_df, fac_loader
+    return train_loader, scaler_train, df_data, df_data_test, arima_pred
+
+import warnings
+# 忽略特定类型的警告
+warnings.filterwarnings('ignore')
+
+
+def get_best_arima_order(series, max_p=5, max_d=0, max_q=5):
+    best_aic = np.inf
+    best_order = None
+    for p in range(max_p + 1):
+        for q in range(max_q + 1):
+            for d in range(max_d + 1):
+                try:
+                    model = ARIMA(series, order=(p, d, q))
+                    results = model.fit()
+                    if results.aic < best_aic:
+                        best_aic = results.aic
+                        best_order = (p, d, q)
+                except:
+                    continue
+    return best_order
+
+
+def get_arima(data, config):
+    pre_len = config.pre_len
+    # 确保输入的数据是一个DataFrame
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("输入数据必须是pandas DataFrame")
+
+    # 获取数据的行数和列数
+    num_rows, num_cols = data.shape
+    # 初始化残差矩阵和预测值矩阵
+    residuals_matrix = np.zeros((num_rows - pre_len, num_cols))
+    predictions_matrix = np.zeros((pre_len, num_cols))
+
+    # 遍历每一列
+    for col in range(num_cols):
+        # 获取当前列的数据
+        series = data.iloc[:, col]
+
+        # 确定最佳ARIMA模型参数
+        order = get_best_arima_order(series)
+
+        # 训练ARIMA模型
+        model = ARIMA(series, order=order)
+        model_fit = model.fit()
+
+        # 预测未来 pre_len 步
+        forecast = model_fit.forecast(steps=pre_len)
+
+        # 计算残差
+        residuals = series[:-pre_len] - model_fit.fittedvalues[:-(pre_len)]
+
+        # 存储残差和预测值
+        residuals_matrix[:, col] = residuals
+        predictions_matrix[:, col] = forecast
+    #将array数据类型转化为dataframe
+    residuals_matrix, predictions_matrix = pd.DataFrame(residuals_matrix), pd.DataFrame(predictions_matrix)
+    return residuals_matrix, predictions_matrix
+
+import torch
+import torch.nn as nn
 
 class SelfAttention(nn.Module):
     def __init__(self, feature_size, heads):
@@ -259,20 +295,81 @@ class DTWLoss(nn.Module):
         dtw_loss = torch.mean(torch.sqrt(DTW[:, len1 - 1, len2 - 1]))
         return dtw_loss
 
+class ATPLRLoss(nn.Module):
+    def __init__(self):
+        super(ATPLRLoss, self).__init__()
+
+    def forward(self, s1_batch, s2_batch):
+        def adaptive_window_plr(s):
+            batch_size = s.shape[0]
+            seq_length = s.shape[1]
+            feat_dim = s.shape[2]
+
+            max_window_size = seq_length // 2  # Max window size is half of sequence length
+
+            # Initialize list to store segment means
+            segments = []
+
+            # Calculate cumulative sums for mean calculation
+            cumulative_sum = torch.cumsum(s, dim=1)
+
+            # Initialize window size and start index
+            window_size = 1
+            start = 0
+
+            while start < seq_length:
+                # Calculate end index of current window
+                end = min(start + window_size, seq_length)
+
+                # Calculate mean for current window
+                segment_mean = (cumulative_sum[:, end - 1] - cumulative_sum[:, start - 1]) / (end - start + 1)
+                segments.append(segment_mean.view(batch_size, 1, feat_dim))
+
+                # Update start index
+                start += window_size
+
+                # Increase window size exponentially
+                window_size *= 2
+                if window_size > max_window_size:
+                    window_size = max_window_size
+
+            # Stack all segments
+            return torch.cat(segments, dim=1)
+        # Get adaptive window piecewise linear representations
+        aw_plr_s1 = adaptive_window_plr(s1_batch)
+        aw_plr_s2 = adaptive_window_plr(s2_batch)
+
+        # Calculate squared differences
+        diff = (aw_plr_s1 - aw_plr_s2).pow(2)
+
+        # Sum of squared differences
+        aw_plr_distance = torch.mean(diff, dim=1)  # Mean over segments
+
+        # Return the mean AW-PLR distance as the loss (the lower the similarity, the higher the loss)
+        AWPLRLoss = torch.mean(aw_plr_distance)
+        return AWPLRLoss
 
 def train(model, args, train_loader):
     start_time = time.time()  # 计算起始时间,用于展示进度
     lstm_model = model
-    loss_function = DTWLoss()
-    optimizer = torch.optim.AdamW(lstm_model.parameters(), lr=0.005)
+    #选择损失函数
+    loss = args.loss
+    loss_select ={
+        'MSE': nn.MSELoss(),
+        'DTW': DTWLoss(),
+        'PLR': ATPLRLoss(),
+    }
+    loss_function = loss_select[loss]
+    #loss_function = nn.MSELoss()
+    #loss_function = DTWLoss()
+    #loss_function = ATPLRLoss()
+    optimizer = torch.optim.Adam(lstm_model.parameters(), lr=0.005)
     epochs = args.epochs
     lstm_model.train()  # 训练模式
     results_loss = []
-
     for i in tqdm(range(epochs)):
         losss = []
         for seq, labels in train_loader:
-            seq, labels = seq.cuda(), labels.cuda()
             optimizer.zero_grad()
             lstm_model.train()
 
@@ -285,14 +382,15 @@ def train(model, args, train_loader):
             single_loss.backward()
 
             optimizer.step()
-            losss.append(single_loss.item())
-        avg_loss = sum(losss) / len(losss)
-        tqdm.write(f"\t Epoch {i + 1} / {epochs}, Loss: {avg_loss}")
-        results_loss.append(avg_loss)
+            losss.append(single_loss.detach().cpu().numpy())
+        tqdm.write(f"\t Epoch {i + 1} / {epochs}, Loss: {sum(losss) / len(losss)}")
+        results_loss.append(sum(losss) / len(losss))
         torch.save(lstm_model.state_dict(), 'save_model.pth')  # 将模型储存在目录下
+        time.sleep(0.1)
 
     # 保存模型
     print(f">>>>>>>>>>>>>>>>>>>>>>模型已保存,用时:{(time.time() - start_time) / 60:.4f} min<<<<<<<<<<<<<<<<<<")
+
 
 def getFactorRate(factor_df, pred_df, config):
     full_data = pd.concat([factor_df, pred_df], axis=0)
@@ -300,8 +398,52 @@ def getFactorRate(factor_df, pred_df, config):
     # pred_rate = pred_rate.tail(n = config.pre_len)
     return pred_rate
 
+def calculate_ic_ir(time_series1, time_series2):
 
-def LSTMargs(data_df, method='rate', window_size=60, pre_len=15, size=8, lr=0.001, drop_out=0.05, epochs=50,
+    # 计算IC（Information Coefficient）
+    ic, _ = pearsonr(time_series1, time_series2)
+
+    # 计算时间序列的平均值和标准差
+    mean1, mean2 = np.mean(time_series1), np.mean(time_series2)
+    std1, std2 = np.std(time_series1), np.std(time_series2)
+
+    # 计算IR（Information Ratio）
+    ir = (mean1 - mean2) / np.sqrt(std1 ** 2 + std2 ** 2)
+
+    return ic, ir
+
+def evaluate(model, args, device, scaler, data, test_data):
+    # 预测未知数据的功能
+    # 重新读取数据
+    # df = pd.read_csv(args.data_path)
+    # df = args.data_df
+    df = data.copy()
+    # train_data = df[[args.target]][int(0.3 * len(df)):]
+    df_pred = df.iloc[:, 0:][-args.window_size:].values  # 取训练数据倒数第一个窗口，转换为nadarry
+    real = test_data.values  # 取所有数据最后一个预测长度的真实数据，数据格式为nadarry
+    pre_data = scaler.transform(df_pred)
+    tensor_pred = torch.FloatTensor(pre_data).to(device)
+    tensor_pred = tensor_pred.unsqueeze(0)  # 单次预测 , 滚动预测功能暂未开发后期补上
+    model = model
+    # method = args.method
+    model.load_state_dict(torch.load('save_model.pth'))
+    model.eval()  # 评估模式
+
+    pred = model(tensor_pred)[0]
+
+    pred = scaler.inverse_transform(pred.detach().cpu().numpy())
+
+    IC = []
+    IR = []
+    for i in range(pred.shape[1]):
+        # 计算每个因子的IC和IR值，并且返回
+        ic_temp, ir_temp = calculate_ic_ir(pred[:, i], real[:, i])
+        IC.append(ic_temp)
+        IR.append(ir_temp)
+
+    return IC, IR
+
+def LSTMargs(data_df, method='rate', loss = 'MSE', window_size=60, pre_len=15, size=8, lr=0.001, drop_out=0.05, epochs=50,
              batch_size=16):
     """
     window_size:用来预测的时间窗口大小
@@ -340,7 +482,8 @@ def LSTMargs(data_df, method='rate', window_size=60, pre_len=15, size=8, lr=0.00
     # model
     parser.add_argument('-hidden-size', type=int, default=128, help="隐藏层单元数")
     parser.add_argument('-kernel-sizes', type=str, default='3')
-    parser.add_argument('-laryer_num', type=int, default=1)
+    parser.add_argument('-laryer_num', type=int, default=3)
+    parser.add_argument('-loss', type=str, default=loss, help="损失函数类型")
     # device
     #parser.add_argument('-use_gpu', type=bool, default=False)
     #parser.add_argument('-device', type=int, default=0, help="只设置最多支持单个gpu训练")
@@ -356,7 +499,7 @@ def LSTMargs(data_df, method='rate', window_size=60, pre_len=15, size=8, lr=0.00
 
 def pred(args):
     device = torch.device("cuda")
-    train_loader, scaler_train, rate_df, fac_df, fac_loader = create_dataloader(args, device)
+    train_loader, scaler_train, rate_df, test_data, arima_pred = create_dataloader(args, device)
     # 实例化模型
     try:
         print(f">>>>>>>>>>>>>>>>>>>>>>>>>开始初始化{args.model}模型<<<<<<<<<<<<<<<<<<<<<<<<<<<")
@@ -372,16 +515,19 @@ def pred(args):
         train(model, args, train_loader)
     if args.predict:
         print(f">>>>>>>>>>>>>>>>>>>>>>>>>预测未来{args.pre_len}条数据<<<<<<<<<<<<<<<<<<<<<<<<<<<")
-        pred = predict(model, args, device, scaler_train, rate_df)
-        #pred_rate = getFactorRate(fac_df, pred, args)
-    return pred
-
+        lstm_pred = predict(model, args, device, scaler_train, rate_df)
+        prediction = arima_pred.add(lstm_pred) #将残差和线性预测结果相加，得到最后结果
+        print(f">>>>>>>>>>>>>>>>>>>>>>>>>输出最后一个窗口的IC和IR值<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+        ic, ir = evaluate(model, args, device, scaler_train, rate_df, test_data)
+        print(f"IC: {ic}, IR: {ir}")
+        print(prediction)
+    return prediction, ic, ir
 # 主要参数修改#
 if __name__ == '__main__':
-    data = pd.read_csv('asset.csv')
+    data = pd.read_csv('datafac.csv')
     # args1 = LSTMargs(data, epochs = 30)
     # pred_val = pred(args1)
     # pred_val.to_csv('pred_rate.csv')
-    args2 = LSTMargs(data, epochs=1)
+    args2 = LSTMargs(data, size = 7, window_size=504, pre_len=60, epochs=50)
     pred = pred(args2)
     # pred_fac.to_csv('pred_fac.csv')
